@@ -1,0 +1,218 @@
+---
+title: "Final Project"
+author: "Zhe Huang"
+date: "4/12/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE}
+library(caret)
+library(MASS)
+library(elasticnet)
+library(kableExtra)
+```
+
+```{r}
+data = read.csv("Data_allfactors_khzl3.csv")
+```
+
+```{r}
+inverse = function(a) {
+   ifelse(is.na(a), 0, 1/a)
+}
+
+data$Current.Ratio = inverse(data$Current.Ratio)
+data$Quick.Ratio = inverse(data$Quick.Ratio)
+nyse_data = subset(data, select = -c(Unnamed..0, Period.Ending, half_year_return, VaR_4_to_6, std_4_to_6))
+```
+
+```{r warning=FALSE}
+################## Train Test Split #########################
+# split the car data, train/test = 8/2
+set.seed(2020)
+nyse_idx = createDataPartition(nyse_data$rtn_relative_4_to_6, p = 0.8, list = FALSE)
+nyse_trn = nyse_data[nyse_idx, ]
+nyse_tst = nyse_data[-nyse_idx, ]
+
+################## Assumption Check for LR ####################
+model = lm(rtn_relative_4_to_6 ~ ., data = nyse_trn)
+par(mfrow = c(2,2))
+plot(model)
+
+################## AIC for Feature Selection ###################
+model_init = lm(rtn_relative_4_to_6 ~ 1, data = nyse_trn)
+aic_mod = stepAIC(
+  model_init,
+  direction = "both",
+  scope = list(upper = model, lower = model_init),
+  trace = 0
+)
+
+bic_mod = stepAIC(
+  model_init,
+  k = log(nrow(nyse_trn)),
+  direction = "both",
+  scope = list(upper = model, lower = model_init),
+  trace = 0
+)
+```
+
+```{r}
+nyse_trn_aic = subset(nyse_trn, select = c(rtn_relative_4_to_6, GICS.Sector, EY.CETOP, three_m_rtn, non.linear.size, After.Tax.ROE, Profit.Margin, size, weighted.alpha, beta, Leverage.DTOA, book.to.price, Leverage.MLEV))
+```
+
+```{r}
+#lm
+set.seed(2020)
+
+mod_lm = train(
+  rtn_relative_4_to_6 ~ .,
+  data = nyse_trn_aic,
+  trControl = trainControl(method = "cv", number = 5),
+  method = "lm"
+)
+```
+
+```{r}
+#KNN
+set.seed(2020)
+
+k_grid = expand.grid(k = seq(5, 100, 5))
+mod_knn = train(
+  rtn_relative_4_to_6 ~ .,
+  data = nyse_trn_aic,
+  trControl = trainControl(method = "cv", number = 5),
+  method = "knn",
+  tuneGrid = k_grid,
+  preProcess = c("center", "scale")
+)
+```
+
+```{r}
+#Lasso
+set.seed(2020)
+
+mod_lasso = train(
+  rtn_relative_4_to_6 ~ .,
+  data = nyse_trn,
+  trControl = trainControl(method = "cv", number = 5),
+  method = "lasso",
+  tuneLength = 19
+)
+```
+
+```{r}
+#Ridge
+set.seed(2020)
+
+mod_ridge = train(
+  rtn_relative_4_to_6 ~ .,
+  data = nyse_trn,
+  trControl = trainControl(method = "cv", number = 5),
+  method = "ridge",
+  tuneLength = 19
+)
+```
+
+```{r warning=FALSE}
+#Elastic Net
+set.seed(2020)
+
+mod_glmnet = train(
+  rtn_relative_4_to_6 ~ .,
+  data = nyse_trn,
+  trControl = trainControl(method = "cv", number = 5),
+  method = "glmnet",
+  tuneLength = 19
+)
+```
+
+***
+
+# Results
+
+```{r}
+get_rmse = function(actual, predicted) {
+  sqrt(mean((actual - predicted) ^ 2))
+}
+
+get_best_result = function(caret_fit) {
+  best = which(rownames(caret_fit$results) == rownames(caret_fit$bestTune))
+  best_result = caret_fit$results[best, ]
+  rownames(best_result) = NULL
+  best_result
+}
+```
+
+```{r}
+cv_rmse = rep(0, 5)
+mod_list = list(mod_lm, mod_knn, mod_lasso, mod_ridge, mod_glmnet)
+best_results = lapply(mod_list, get_best_result)
+for (i in 1:5) {
+  cv_rmse[i] = best_results[[i]]$RMSE
+}
+```
+
+```{r}
+tst_pred = lapply(mod_list, predict, newdata = nyse_tst)
+tst_rmse = sapply(tst_pred, get_rmse, actual = nyse_tst$rtn_relative_4_to_6)
+```
+
+```{r}
+names = c("Linear regression",
+          "K-nearest neighbors",
+          "Lasso",
+          "Ridge",
+          "Elastic net")
+results = data.frame(names, cv_rmse, tst_rmse)
+colnames(results) = c("Model", "Cross-validated RMSE", "Test RMSE")
+kable(results, "html", digits = 4) %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+```
+
+## The Best Model
+
+```{r}
+best_mod = data.frame(
+  "Elastic net",
+  "`next_three_m_rtn ~ .`",
+  mod_glmnet$bestTune$alpha,
+  mod_glmnet$bestTune$lambda,
+  best_results[[4]]$Rsquared,
+  cv_rmse[4],
+  tst_rmse[4]
+  )
+colnames(best_mod) = c(
+  "Type",
+  "Model",
+  "alpha",
+  "lambda",
+  "R-squared",
+  "Cross-validated RMSE",
+  "Test RMSE"
+  )
+
+kable(best_mod, "html", digits = 4) %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+```
+
+```{r}
+plot(mod_glmnet)
+```
+
+```{r}
+plot(
+  tst_pred[[2]] ~ nyse_tst$rtn_relative_4_to_6,
+  col = "blue",
+  pch = 20,
+  cex = 0.5,
+  main = "Predicted vs. Actual Plot",
+  ylab = "Predicted",
+  xlab = "Actual"
+)
+abline(a = 0, b = 1, col = "orange")
+```
